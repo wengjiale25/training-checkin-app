@@ -1,0 +1,19 @@
+{
+  "name": "训练打卡",
+  "short_name": "训练",
+  "description": "专注当前动作，快速记录每一组训练。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f6fa",
+  "theme_color": "#0f9f8f",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "./icons/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
