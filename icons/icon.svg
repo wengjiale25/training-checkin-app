@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="训练打卡">
+  <rect width="512" height="512" rx="96" fill="#14b8a6"/>
+  <path d="M129 177h254v234H129z" fill="#ffffff"/>
+  <path d="M158 142h45v70h-45zM309 142h45v70h-45z" fill="#0f766e"/>
+  <path d="M171 268l55 55 121-128" fill="none" stroke="#f97316" stroke-width="44" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M129 217h254" stroke="#0f766e" stroke-width="24"/>
+</svg>
