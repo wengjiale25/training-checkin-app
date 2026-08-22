@@ -6,13 +6,13 @@
     <meta name="theme-color" content="#0f9f8f" />
     <meta
       name="description"
-      content="专注当前动作、快速记录每一组的手机训练打卡工具。"
+      content="六课三分化循环、力量后有氧与游泳记录的手机训练打卡工具。"
     />
     <title>训练打卡</title>
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="./icons/icon.svg" />
-    <link rel="stylesheet" href="./styles.css?v=4" />
+    <link rel="stylesheet" href="./styles.css?v=10" />
   </head>
   <body>
     <main class="app-shell">
@@ -53,6 +53,7 @@
       <section class="view" id="todayView">
         <div class="plan-meta" id="planMeta"></div>
         <div class="exercise-list" id="exerciseList"></div>
+        <div class="conditioning-area" id="conditioningArea"></div>
         <div id="completionCard"></div>
         <div class="journal-area" id="journalArea"></div>
       </section>
@@ -65,6 +66,18 @@
         <div class="history-summary" id="historySummary"></div>
         <div class="history-list" id="historyList"></div>
       </section>
+
+      <section class="view" id="weightsView" hidden>
+        <header class="weights-header">
+          <div>
+            <p>动作数据库</p>
+            <h2>常用重量</h2>
+          </div>
+          <span id="weightsStatus">自动保存</span>
+        </header>
+        <div class="weight-filters" id="weightFilters" aria-label="动作部位筛选"></div>
+        <div class="weights-list" id="weightsList"></div>
+      </section>
     </main>
 
     <nav class="bottom-nav" aria-label="主导航">
@@ -75,7 +88,11 @@
       </button>
       <button class="nav-item" type="button" data-view="week">
         <span class="nav-icon" aria-hidden="true">周</span>
-        周计划
+        循环
+      </button>
+      <button class="nav-item" type="button" data-view="weights">
+        <span class="nav-icon" aria-hidden="true">磅</span>
+        重量
       </button>
       <button class="nav-item" type="button" data-view="history">
         <span class="nav-icon" aria-hidden="true">时</span>
@@ -106,8 +123,8 @@
     <script>
       window.APP_V3 = true;
     </script>
-    <script src="./app.js?v=4"></script>
-    <script src="./guides.js?v=4"></script>
-    <script src="./experience.js?v=4"></script>
+    <script src="./app.js?v=10"></script>
+    <script src="./guides.js?v=10"></script>
+    <script src="./experience.js?v=10"></script>
   </body>
 </html>

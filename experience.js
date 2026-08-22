@@ -1,16 +1,22 @@
 const STORE_KEY = "training-checkin-v1";
 const TIMER_KEY = "training-checkin-timer-v1";
-const TRAINING_PLAN = window.TRAINING_PLAN;
+const TRAINING_CYCLE = window.TRAINING_CYCLE || [];
+const WEEKEND_PLANS = window.WEEKEND_PLANS || {};
+const CYCLE_CONFIG = window.CYCLE_CONFIG || { anchorDate: "2026-08-17", anchorIndex: 0 };
 const EXERCISE_GUIDES = window.EXERCISE_GUIDES || {};
-const FEEL_OPTIONS = ["轻松", "刚好", "吃力"];
+const WEEKDAY_NAMES = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
 const COMPOUND_EXERCISES = new Set([
   "leg-press",
   "hack-squat",
   "hip-thrust",
   "chest-press",
   "incline-press",
-  "lat-pulldown",
-  "chest-supported-row",
+  "assisted-dip",
+  "shoulder-press",
+  "reverse-grip-pulldown",
+  "neutral-pulldown",
+  "narrow-neutral-row",
+  "upper-back-row",
 ]);
 
 const appState = {
@@ -22,11 +28,16 @@ const appState = {
   openDailyNote: false,
   timer: loadJson(TIMER_KEY, null),
   timerTicker: null,
+  timerAutoClose: null,
+  sessionTicker: null,
   toastTimer: null,
   undoAction: null,
   deferredPrompt: null,
   guideExerciseId: "",
   guideTab: "motion",
+  weightFilter: "all",
+  extraType: "strength",
+  extraWeightUnit: "lb",
 };
 
 const elements = {
@@ -40,11 +51,16 @@ const elements = {
   dayStrip: document.querySelector("#dayStrip"),
   planMeta: document.querySelector("#planMeta"),
   exerciseList: document.querySelector("#exerciseList"),
+  conditioningArea: document.querySelector("#conditioningArea"),
   completionCard: document.querySelector("#completionCard"),
   journalArea: document.querySelector("#journalArea"),
   weekPlanList: document.querySelector("#weekPlanList"),
   historySummary: document.querySelector("#historySummary"),
   historyList: document.querySelector("#historyList"),
+  weightsView: document.querySelector("#weightsView"),
+  weightFilters: document.querySelector("#weightFilters"),
+  weightsList: document.querySelector("#weightsList"),
+  weightsStatus: document.querySelector("#weightsStatus"),
   todayView: document.querySelector("#todayView"),
   weekView: document.querySelector("#weekView"),
   historyView: document.querySelector("#historyView"),
@@ -57,6 +73,12 @@ const elements = {
   toast: document.querySelector("#toast"),
 };
 
+function ensureStoreShape() {
+  if (!appState.store || typeof appState.store !== "object") appState.store = {};
+  if (!appState.store.records) appState.store.records = {};
+  if (!appState.store.exerciseDefaults) appState.store.exerciseDefaults = {};
+}
+
 function loadJson(key, fallback) {
   try {
     return JSON.parse(localStorage.getItem(key)) ?? fallback;
@@ -66,6 +88,7 @@ function loadJson(key, fallback) {
 }
 
 function saveStore() {
+  ensureStoreShape();
   localStorage.setItem(STORE_KEY, JSON.stringify(appState.store));
 }
 
@@ -115,15 +138,108 @@ function formatFullDate(date) {
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
-function planIndexForDate(date) {
-  return (date.getDay() + 6) % 7;
+function modulo(value, divisor) {
+  return ((value % divisor) + divisor) % divisor;
+}
+
+function trainingDayOffset(date) {
+  const anchor = parseDateKey(CYCLE_CONFIG.anchorDate);
+  const target = startOfDay(date);
+  let offset = 0;
+
+  if (target >= anchor) {
+    for (let cursor = anchor; cursor < target; cursor = addDays(cursor, 1)) {
+      if (cursor.getDay() !== 0 && cursor.getDay() !== 6) offset += 1;
+    }
+    return offset;
+  }
+
+  for (let cursor = addDays(anchor, -1); cursor >= target; cursor = addDays(cursor, -1)) {
+    if (cursor.getDay() !== 0 && cursor.getDay() !== 6) offset -= 1;
+  }
+  return offset;
+}
+
+function scheduledPlanForDate(date) {
+  const weekday = date.getDay();
+  const basePlan =
+    weekday === 0
+      ? WEEKEND_PLANS.sunday
+      : weekday === 6
+        ? WEEKEND_PLANS.saturday
+        : TRAINING_CYCLE[
+            modulo(trainingDayOffset(date) + Number(CYCLE_CONFIG.anchorIndex || 0), TRAINING_CYCLE.length)
+          ];
+
+  return {
+    ...basePlan,
+    day: WEEKDAY_NAMES[weekday],
+  };
+}
+
+function allSessionPlans() {
+  return [...TRAINING_CYCLE, WEEKEND_PLANS.saturday, WEEKEND_PLANS.sunday].filter(Boolean);
+}
+
+function planById(id) {
+  return allSessionPlans().find((plan) => plan.id === id);
+}
+
+function planForDate(date) {
+  const record = appState.store.records?.[dateKey(date)];
+  const basePlan = record?.planSnapshot
+    ? record.planSnapshot
+    : record?.planOverrideId && planById(record.planOverrideId)
+      ? { ...planById(record.planOverrideId), day: WEEKDAY_NAMES[date.getDay()] }
+      : scheduledPlanForDate(date);
+  const extras = Array.isArray(record?.extraExercises) ? record.extraExercises : [];
+  if (!extras.length) return basePlan;
+  return { ...basePlan, exercises: [...basePlan.exercises, ...extras] };
 }
 
 function selectedPlan() {
-  return TRAINING_PLAN[planIndexForDate(appState.selectedDate)];
+  return planForDate(appState.selectedDate);
+}
+
+function exerciseDefault(exerciseId) {
+  ensureStoreShape();
+  return appState.store.exerciseDefaults[exerciseId] || { quickWeight: "", quickReps: "" };
+}
+
+function saveExerciseDefault(exerciseId, field, value) {
+  ensureStoreShape();
+  if (!appState.store.exerciseDefaults[exerciseId]) {
+    appState.store.exerciseDefaults[exerciseId] = { quickWeight: "", quickReps: "" };
+  }
+  appState.store.exerciseDefaults[exerciseId][field] = String(value ?? "");
+  saveStore();
+}
+
+function updateExerciseValue(exerciseId, field, value) {
+  saveExerciseDefault(exerciseId, field, value);
+  const record = ensureRecord(dateKey(appState.selectedDate));
+  if (record.exercises[exerciseId]) {
+    record.exercises[exerciseId][field] = String(value ?? "");
+    touchRecord(record);
+  }
+}
+
+function displayedValues(exerciseId, item = {}) {
+  const defaults = exerciseDefault(exerciseId);
+  const hasPerformance = item.sets?.some((set) => set.done || set.weight || set.reps) || item.note?.trim();
+  return {
+    quickWeight: hasPerformance
+      ? item.quickWeight || defaults.quickWeight || ""
+      : defaults.quickWeight || item.quickWeight || "",
+    quickReps: hasPerformance
+      ? item.quickReps || defaults.quickReps || ""
+      : defaults.quickReps || item.quickReps || "",
+  };
 }
 
 function findPreviousValues(exerciseId, beforeKey) {
+  const defaults = exerciseDefault(exerciseId);
+  if (defaults.quickWeight || defaults.quickReps) return { ...defaults };
   const previous = Object.values(appState.store.records || {})
     .filter((record) => record.date < beforeKey && record.exercises?.[exerciseId])
     .sort((a, b) => b.date.localeCompare(a.date))
@@ -140,8 +256,8 @@ function findPreviousValues(exerciseId, beforeKey) {
   };
 }
 
-function ensureRecord(key, plan = TRAINING_PLAN[planIndexForDate(parseDateKey(key))]) {
-  if (!appState.store.records) appState.store.records = {};
+function ensureRecord(key, plan = planForDate(parseDateKey(key))) {
+  ensureStoreShape();
   if (!appState.store.records[key]) {
     appState.store.records[key] = {
       date: key,
@@ -150,10 +266,16 @@ function ensureRecord(key, plan = TRAINING_PLAN[planIndexForDate(parseDateKey(ke
       completedAt: "",
       exercises: {},
       dailyNote: "",
+      planId: plan.id,
+      extraExercises: [],
+      session: { status: "idle", elapsedMs: 0, resumedAt: 0, endedAt: 0 },
     };
   }
 
   const record = appState.store.records[key];
+  if (!record.planId && !record.planSnapshot) record.planId = plan.id;
+  if (!Array.isArray(record.extraExercises)) record.extraExercises = [];
+  if (!record.session) record.session = { status: "idle", elapsedMs: 0, resumedAt: 0, endedAt: 0 };
   if (!record.exercises) record.exercises = {};
   plan.exercises.forEach((exercise) => {
     if (!record.exercises[exercise.id]) {
@@ -164,6 +286,9 @@ function ensureRecord(key, plan = TRAINING_PLAN[planIndexForDate(parseDateKey(ke
         quickWeight: "",
         quickReps: "",
         defaultsApplied: false,
+        skipped: false,
+        skipReason: "",
+        recordedAt: "",
       };
     }
 
@@ -184,6 +309,8 @@ function ensureRecord(key, plan = TRAINING_PLAN[planIndexForDate(parseDateKey(ke
       const previous = findPreviousValues(exercise.id, key);
       if (!item.quickWeight) item.quickWeight = previous.quickWeight;
       if (!item.quickReps) item.quickReps = previous.quickReps;
+      if (item.quickWeight) saveExerciseDefault(exercise.id, "quickWeight", item.quickWeight);
+      if (item.quickReps) saveExerciseDefault(exercise.id, "quickReps", item.quickReps);
       item.defaultsApplied = true;
     }
   });
@@ -198,31 +325,37 @@ function touchRecord(record) {
 
 function getExerciseProgress(exercise, record) {
   const item = record.exercises[exercise.id];
+  if (item?.skipped) {
+    return { complete: 0, total: 0, isComplete: true, isSkipped: true };
+  }
   const complete = (item?.sets || []).filter((set) => set.done).length;
   return {
     complete,
     total: exercise.sets,
     isComplete: complete === exercise.sets,
+    isSkipped: false,
   };
 }
 
 function getProgress(plan, record) {
-  const total = plan.exercises.reduce((sum, exercise) => sum + exercise.sets, 0);
-  const complete = plan.exercises.reduce(
+  const allRequired = plan.exercises.filter((exercise) => !exercise.optional);
+  const requiredExercises = allRequired.filter((exercise) => !record.exercises[exercise.id]?.skipped);
+  const total = requiredExercises.reduce((sum, exercise) => sum + exercise.sets, 0);
+  const complete = requiredExercises.reduce(
     (sum, exercise) => sum + getExerciseProgress(exercise, record).complete,
     0,
   );
   return {
     total,
     complete,
-    percent: total ? Math.round((complete / total) * 100) : 0,
+    percent: total ? Math.round((complete / total) * 100) : allRequired.length ? 100 : 0,
   };
 }
 
 function hasRecordContent(record) {
   if (record.dailyNote?.trim()) return true;
   return Object.values(record.exercises || {}).some((item) => {
-    if (item.feel || item.note?.trim()) return true;
+    if (item.note?.trim() || item.skipped || item.recordedAt) return true;
     return item.sets?.some((set) => set.done || set.weight || set.reps);
   });
 }
@@ -252,7 +385,18 @@ function metricLabels(exercise) {
   if (exercise.type === "cardio") return ["时长或距离", "实际强度"];
   if (exercise.id.includes("plank")) return ["负重", "完成秒数"];
   if (exercise.type === "recovery") return ["完成时长", "实际感受"];
-  return ["重量 kg", "实际次数"];
+  if (exercise.type === "core") return ["负重", "实际次数"];
+  const unit = exercise.weightUnit === "kg" ? "kg" : "磅";
+  return [exercise.id === "assisted-dip" ? `辅助重量 ${unit}` : `重量 ${unit}`, "实际次数"];
+}
+
+function exerciseWeightUnit(exercise) {
+  if (exercise.type !== "strength") return "";
+  return exercise.weightUnit === "kg" ? "kg" : "磅";
+}
+
+function isConditioningExercise(exercise) {
+  return exercise.type === "cardio";
 }
 
 function resolveFocusedExercise(plan, record) {
@@ -260,7 +404,11 @@ function resolveFocusedExercise(plan, record) {
   if (requested) return requested.id;
 
   const firstIncomplete = plan.exercises.find(
-    (exercise) => !getExerciseProgress(exercise, record).isComplete,
+    (exercise) =>
+      !exercise.optional &&
+      !isConditioningExercise(exercise) &&
+      !record.exercises[exercise.id]?.skipped &&
+      !getExerciseProgress(exercise, record).isComplete,
   );
   appState.focusedExerciseId = firstIncomplete?.id || "";
   return appState.focusedExerciseId;
@@ -289,6 +437,7 @@ function render() {
   renderViews(plan, record, progress);
   updateNav();
   renderTimer();
+  updateSessionTicker();
 }
 
 function renderDayStrip() {
@@ -296,8 +445,9 @@ function renderDayStrip() {
   const selectedKey = dateKey(appState.selectedDate);
   const todayKey = dateKey(new Date());
 
-  elements.dayStrip.innerHTML = TRAINING_PLAN.map((plan, index) => {
+  elements.dayStrip.innerHTML = Array.from({ length: 7 }, (_, index) => {
     const dayDate = addDays(weekStart, index);
+    const plan = planForDate(dayDate);
     const key = dateKey(dayDate);
     const dayRecord = ensureRecord(key, plan);
     const progress = getProgress(plan, dayRecord);
@@ -321,54 +471,134 @@ function renderViews(plan, record, progress) {
   const showToday = appState.activeView === "today";
   const showWeek = appState.activeView === "week";
   const showHistory = appState.activeView === "history";
+  const showWeights = appState.activeView === "weights";
 
   elements.todayView.hidden = !showToday;
   elements.weekView.hidden = !showWeek;
   elements.historyView.hidden = !showHistory;
+  elements.weightsView.hidden = !showWeights;
   elements.progressPanel.hidden = !showToday;
-  document.querySelector(".week-control").hidden = showHistory;
+  document.querySelector(".week-control").hidden = showHistory || showWeights;
 
   if (showToday) {
-    renderPlanMeta(plan);
+    renderPlanMeta(plan, record);
     renderExercises(plan, record);
     renderCompletion(plan, record, progress);
     renderJournal(record, progress);
   }
   if (showWeek) renderWeekPlan();
   if (showHistory) renderHistory();
+  if (showWeights) renderWeights();
 }
 
-function renderPlanMeta(plan) {
+function renderPlanMeta(plan, record) {
+  const session = record.session || { status: "idle", elapsedMs: 0 };
+  const running = session.status === "running";
+  const finished = session.status === "finished";
   elements.planMeta.innerHTML = `
-    <div class="focus-copy">
-      <span class="focus-dot" aria-hidden="true"></span>
-      <p>${escapeHtml(plan.focus)}</p>
+    <div class="session-console">
+      <div class="session-clock">
+        <span>${finished ? "本次用时" : running ? "训练进行中" : session.status === "paused" ? "训练已暂停" : "本次训练"}</span>
+        <strong id="sessionElapsed">${formatElapsed(sessionElapsedMs(session))}</strong>
+      </div>
+      <div class="session-actions">
+        ${
+          finished
+            ? '<button type="button" data-action="session-reset">重新计时</button>'
+            : running
+              ? '<button type="button" data-action="session-pause">暂停</button><button class="finish" type="button" data-action="session-finish">结束</button>'
+              : `<button class="primary" type="button" data-action="session-start">${session.status === "paused" ? "继续" : "开始计时"}</button>${session.status === "paused" ? '<button class="finish" type="button" data-action="session-finish">结束</button>' : ""}`
+        }
+      </div>
     </div>
-    <div class="meta-line">
-      ${plan.tags.map((tag) => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}
+    <div class="plan-tools">
+      <div class="focus-copy">
+        <span class="focus-dot" aria-hidden="true"></span>
+        <p>${escapeHtml(plan.focus)}</p>
+      </div>
+      <button class="add-training-button" type="button" data-action="open-add-exercise" data-extra-type="strength">＋ 加练</button>
     </div>
   `;
 }
 
 function renderExercises(plan, record) {
-  elements.exerciseList.innerHTML = plan.exercises
-    .map((exercise, index) => renderExerciseCard(exercise, record, index))
+  const exercises = plan.exercises.filter((exercise) => !isConditioningExercise(exercise));
+  elements.exerciseList.innerHTML = exercises
+    .map((exercise, index) => renderExerciseCard(exercise, record, index, exercises.length))
     .join("");
+  renderConditioning(plan, record);
 }
 
-function renderExerciseCard(exercise, record, index) {
+function exerciseRecordSummary(exercise, item) {
+  const values = displayedValues(exercise.id, item);
+  if (exercise.type === "strength") {
+    return [
+      values.quickWeight && `${values.quickWeight}${exerciseWeightUnit(exercise)}`,
+      values.quickReps && `${values.quickReps}次`,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  return [values.quickWeight, values.quickReps].filter(Boolean).join(" · ");
+}
+
+function renderConditioning(plan, record) {
+  const exercises = plan.exercises.filter(isConditioningExercise);
+  if (!exercises.length) {
+    elements.conditioningArea.innerHTML = `
+      <button class="conditioning-add" type="button" data-action="open-add-exercise" data-extra-type="cardio">＋ 记录额外有氧</button>
+    `;
+    return;
+  }
+
+  elements.conditioningArea.innerHTML = `
+    <section class="conditioning-panel">
+      <header>
+        <div><span>收尾项目</span><strong>有氧与游泳</strong></div>
+        <button type="button" data-action="open-add-exercise" data-extra-type="cardio">＋ 添加</button>
+      </header>
+      <div class="conditioning-list">
+        ${exercises
+          .map((exercise) => {
+            const item = record.exercises[exercise.id];
+            const progress = getExerciseProgress(exercise, record);
+            return `
+              <div class="conditioning-row${progress.isComplete ? " done" : ""}${exercise.optional ? " optional" : ""}">
+                <button type="button" data-action="toggle-set" data-exercise="${exercise.id}" data-set="0" aria-pressed="${progress.isComplete}">
+                  <span class="conditioning-check">${progress.isComplete ? "✓" : ""}</span>
+                  <span><strong>${escapeHtml(exercise.name)}</strong><small>${escapeHtml(exercise.target)}${exercise.optional ? " · 可选" : ""}</small></span>
+                </button>
+                ${exercise.extra ? `<button class="conditioning-remove" type="button" data-action="remove-extra" data-exercise="${exercise.id}" aria-label="删除${escapeHtml(exercise.name)}">×</button>` : ""}
+              </div>
+            `;
+          })
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderExerciseCard(exercise, record, index, exerciseCount) {
   const item = record.exercises[exercise.id];
   const progress = getExerciseProgress(exercise, record);
   const isActive = exercise.id === appState.focusedExerciseId;
-  const recordSummary = [item.quickWeight && `${item.quickWeight}${exercise.type === "strength" ? "kg" : ""}`, item.quickReps, item.feel]
-    .filter(Boolean)
-    .join(" · ");
+  const recordSummary = exerciseRecordSummary(exercise, item);
 
   if (!isActive) {
-    const stateLabel = progress.isComplete ? "已完成" : index > planExerciseIndex(record, exercise.id) ? "待训练" : "继续";
+    const stateLabel = progress.isSkipped
+      ? "已跳过"
+      : exercise.optional
+      ? progress.isComplete
+        ? "已记录"
+        : "可选"
+      : progress.isComplete
+        ? "已完成"
+        : index > planExerciseIndex(record, exercise.id)
+          ? "待训练"
+          : "继续";
     return `
       <article
-        class="exercise-card compact${progress.isComplete ? " complete" : " upcoming"}"
+        class="exercise-card compact${exercise.optional ? " optional" : ""}${progress.isComplete ? " complete" : " upcoming"}${progress.isSkipped ? " skipped" : ""}"
         data-exercise-card="${exercise.id}"
         style="--delay:${Math.min(index, 5) * 32}ms"
       >
@@ -379,12 +609,12 @@ function renderExerciseCard(exercise, record, index) {
           data-exercise="${exercise.id}"
           aria-label="${stateLabel}：${escapeHtml(exercise.name)}"
         >
-          <span class="step-marker${progress.isComplete ? " done" : ""}">${progress.isComplete ? "✓" : index + 1}</span>
+          <span class="step-marker${progress.isComplete ? " done" : ""}">${progress.isSkipped ? "−" : progress.isComplete ? "✓" : index + 1}</span>
           <span class="summary-copy">
             <strong>${escapeHtml(exercise.name)}</strong>
-            <small>${exercise.sets}组 × ${escapeHtml(exercise.target)}${recordSummary ? ` · ${escapeHtml(recordSummary)}` : ""}</small>
+            <small>${progress.isSkipped ? `已跳过${item.skipReason ? ` · ${escapeHtml(item.skipReason)}` : ""}` : `${exercise.optional ? "可选 · " : ""}${exercise.sets}组 × ${escapeHtml(exercise.target)}`}</small>
           </span>
-          <span class="summary-status">${progress.isComplete ? "完成" : "展开"}</span>
+          <span class="summary-status">${progress.isSkipped ? "跳过" : recordSummary || (progress.isComplete ? "完成" : exercise.optional ? "可选" : "展开")}</span>
         </button>
       </article>
     `;
@@ -392,16 +622,16 @@ function renderExerciseCard(exercise, record, index) {
 
   return `
     <article
-      class="exercise-card active"
+      class="exercise-card active${exercise.optional ? " optional" : ""}"
       data-exercise-card="${exercise.id}"
       style="--delay:${Math.min(index, 5) * 32}ms"
     >
       <header class="exercise-header">
         <div class="active-step">
-          <span>当前动作 ${index + 1}/${selectedPlan().exercises.length}</span>
-          <strong>${typeLabel(exercise.type)}</strong>
+          <span>${exercise.extra ? "当天加练" : exercise.optional ? "可选项目" : `当前动作 ${index + 1}/${exerciseCount}`}</span>
+          <strong>${exercise.optional ? "不计入进度" : typeLabel(exercise.type)}</strong>
         </div>
-        <span class="status-chip">${progress.complete}/${progress.total}</span>
+        <span class="status-chip">${progress.isSkipped ? "已跳过" : `${progress.complete}/${progress.total}`}</span>
       </header>
       <div class="exercise-title-row">
         <div>
@@ -427,9 +657,9 @@ function renderExerciseCard(exercise, record, index) {
           </button>
         </div>
       </div>
-      ${recordSummary ? `<p class="record-summary">本次沿用：${escapeHtml(recordSummary)}</p>` : ""}
+      <p class="record-summary">${recordSummary ? `本次：${escapeHtml(recordSummary)}` : exercise.type === "strength" ? `还没设置重量 · 默认${exerciseWeightUnit(exercise)}` : "可按实际完成情况记录"}</p>
       <p class="exercise-note">${escapeHtml(exercise.note)}</p>
-      <div class="set-list" aria-label="${escapeHtml(exercise.name)}组数">
+      ${progress.isSkipped ? `<div class="skipped-notice"><strong>这个动作本次不练</strong><span>${escapeHtml(item.skipReason || "可恢复后继续打卡")}</span></div>` : `<div class="set-list" aria-label="${escapeHtml(exercise.name)}组数">
         ${Array.from({ length: exercise.sets }, (_, setIndex) => {
           const set = item.sets[setIndex] || { done: false };
           const setKey = `${dateKey(appState.selectedDate)}:${exercise.id}:${setIndex}`;
@@ -448,7 +678,11 @@ function renderExerciseCard(exercise, record, index) {
           `;
         }).join("")}
       </div>
-      <p class="set-hint">完成一组点一下，记录会自动保存</p>
+      <p class="set-hint">完成一组点一下，记录会自动保存</p>`}
+      <div class="exercise-secondary-actions">
+        <button type="button" data-action="toggle-skip" data-exercise="${exercise.id}">${progress.isSkipped ? "恢复动作" : "本次跳过"}</button>
+        ${exercise.extra ? `<button class="danger" type="button" data-action="remove-extra" data-exercise="${exercise.id}">删除加练</button>` : ""}
+      </div>
     </article>
   `;
 }
@@ -473,8 +707,8 @@ function renderCompletion(plan, record, progress) {
     <article class="completion-card">
       <span class="completion-check" aria-hidden="true">✓</span>
       <div>
-        <p>今天的训练完成了</p>
-        <h3>${progress.total}组全部打卡${duration ? ` · ${duration}分钟` : ""}</h3>
+        <p>${progress.total ? "今天的训练完成了" : "今天的计划已处理"}</p>
+        <h3>${progress.total ? `${progress.total}组全部打卡` : "已按实际情况调整"}${duration ? ` · ${duration}分钟` : ""}</h3>
       </div>
     </article>
   `;
@@ -497,22 +731,114 @@ function renderJournal(record, progress) {
 }
 
 function trainingDuration(record) {
+  if (record.session?.elapsedMs) return Math.max(1, Math.round(sessionElapsedMs(record.session) / 60000));
   if (!record.startedAt || !record.completedAt) return 0;
   return Math.max(1, Math.round((new Date(record.completedAt) - new Date(record.startedAt)) / 60000));
 }
 
+function sessionElapsedMs(session) {
+  if (!session) return 0;
+  const saved = Number(session.elapsedMs) || 0;
+  return session.status === "running" && session.resumedAt ? saved + Math.max(0, Date.now() - session.resumedAt) : saved;
+}
+
+function formatElapsed(milliseconds) {
+  const totalSeconds = Math.floor(Math.max(0, milliseconds) / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+}
+
+function updateSessionClock() {
+  const clock = document.querySelector("#sessionElapsed");
+  if (!clock || appState.activeView !== "today") return;
+  const record = ensureRecord(dateKey(appState.selectedDate));
+  clock.textContent = formatElapsed(sessionElapsedMs(record.session));
+}
+
+function updateSessionTicker() {
+  const record = ensureRecord(dateKey(appState.selectedDate));
+  const shouldRun = appState.activeView === "today" && record.session?.status === "running";
+  if (shouldRun && !appState.sessionTicker) {
+    appState.sessionTicker = setInterval(updateSessionClock, 1000);
+  } else if (!shouldRun && appState.sessionTicker) {
+    clearInterval(appState.sessionTicker);
+    appState.sessionTicker = null;
+  }
+}
+
+function startSessionTimer() {
+  const record = ensureRecord(dateKey(appState.selectedDate));
+  const session = record.session;
+  if (session.status === "finished") return;
+  session.status = "running";
+  session.resumedAt = Date.now();
+  session.endedAt = 0;
+  if (!session.startedAt) session.startedAt = Date.now();
+  touchRecord(record);
+  render();
+  showToast(session.elapsedMs ? "训练计时继续" : "训练计时已开始");
+}
+
+function pauseSessionTimer() {
+  const record = ensureRecord(dateKey(appState.selectedDate));
+  const session = record.session;
+  if (session.status !== "running") return;
+  session.elapsedMs = sessionElapsedMs(session);
+  session.resumedAt = 0;
+  session.status = "paused";
+  touchRecord(record);
+  render();
+  showToast("训练计时已暂停");
+}
+
+function finishSessionTimer() {
+  const record = ensureRecord(dateKey(appState.selectedDate));
+  const before = { ...record.session };
+  record.session.elapsedMs = sessionElapsedMs(record.session);
+  record.session.resumedAt = 0;
+  record.session.endedAt = Date.now();
+  record.session.status = "finished";
+  touchRecord(record);
+  render();
+  showToast(`本次训练 ${formatElapsed(record.session.elapsedMs)}`, () => {
+    const undoRecord = ensureRecord(dateKey(appState.selectedDate));
+    undoRecord.session = before;
+    touchRecord(undoRecord);
+    render();
+  });
+}
+
+function resetSessionTimer() {
+  const record = ensureRecord(dateKey(appState.selectedDate));
+  const before = { ...record.session };
+  record.session = { status: "idle", elapsedMs: 0, resumedAt: 0, endedAt: 0, startedAt: 0 };
+  touchRecord(record);
+  render();
+  showToast("计时已重置", () => {
+    const undoRecord = ensureRecord(dateKey(appState.selectedDate));
+    undoRecord.session = before;
+    touchRecord(undoRecord);
+    render();
+  });
+}
+
 function renderWeekPlan() {
   const weekStart = startOfWeek(appState.selectedDate);
-  elements.weekPlanList.innerHTML = TRAINING_PLAN.map((day, index) => {
+  elements.weekPlanList.innerHTML = Array.from({ length: 7 }, (_, index) => {
     const currentDate = addDays(weekStart, index);
+    const day = planForDate(currentDate);
     const key = dateKey(currentDate);
     const record = ensureRecord(key, day);
     const progress = getProgress(day, record);
     const exercisePreview = day.exercises
+      .filter((exercise) => !exercise.optional)
       .slice(0, 4)
       .map((exercise) => exercise.name)
       .join("、");
-    const moreCount = Math.max(0, day.exercises.length - 4);
+    const requiredCount = day.exercises.filter((exercise) => !exercise.optional).length;
+    const moreCount = Math.max(0, requiredCount - 4);
 
     return `
       <article class="week-day-card${progress.percent === 100 ? " complete" : ""}">
@@ -523,7 +849,7 @@ function renderWeekPlan() {
           </span>
           <span class="week-day-main">
             <strong>${escapeHtml(day.title)}</strong>
-            <small>${escapeHtml(exercisePreview)}${moreCount ? `等${day.exercises.length}项` : ""}</small>
+            <small>${escapeHtml(exercisePreview)}${moreCount ? `等${requiredCount}项` : ""}</small>
           </span>
           <span class="week-progress">${progress.percent}%</span>
         </button>
@@ -540,7 +866,7 @@ function renderHistory() {
 
   const stats = records.reduce(
     (summary, record) => {
-      const plan = TRAINING_PLAN[planIndexForDate(parseDateKey(record.date))];
+      const plan = planForDate(parseDateKey(record.date));
       const progress = getProgress(plan, ensureRecord(record.date, plan));
       summary.sets += progress.complete;
       if (progress.percent === 100) summary.completeDays += 1;
@@ -568,11 +894,10 @@ function renderHistory() {
   elements.historyList.innerHTML = records
     .map((record) => {
       const date = parseDateKey(record.date);
-      const plan = TRAINING_PLAN[planIndexForDate(date)];
+      const plan = planForDate(date);
       const currentRecord = ensureRecord(record.date, plan);
       const progress = getProgress(plan, currentRecord);
       const duration = trainingDuration(currentRecord);
-      const feel = mostCommonFeel(currentRecord);
       return `
         <article class="history-card">
           <button type="button" data-action="open-history" data-date="${record.date}">
@@ -582,7 +907,7 @@ function renderHistory() {
             </span>
             <span class="history-main">
               <strong>${plan.day} · ${escapeHtml(plan.title)}</strong>
-              <small>${progress.complete}/${progress.total}组${duration ? ` · ${duration}分钟` : ""}${feel ? ` · ${feel}` : ""}</small>
+              <small>${progress.complete}/${progress.total}组${duration ? ` · ${duration}分钟` : ""}</small>
               <i><b style="width:${progress.percent}%"></b></i>
             </span>
             <span class="history-percent">${progress.percent}%</span>
@@ -593,14 +918,97 @@ function renderHistory() {
     .join("");
 }
 
-function mostCommonFeel(record) {
-  const feels = Object.values(record.exercises || {})
-    .map((item) => item.feel)
-    .filter(Boolean);
-  if (!feels.length) return "";
-  return [...FEEL_OPTIONS].sort(
-    (a, b) => feels.filter((feel) => feel === b).length - feels.filter((feel) => feel === a).length,
-  )[0];
+function exerciseCatalog() {
+  const catalog = new Map();
+  const add = (exercise, group) => {
+    if (exercise.type !== "strength") return;
+    if (!catalog.has(exercise.id)) catalog.set(exercise.id, { ...exercise, group });
+  };
+
+  TRAINING_CYCLE.forEach((plan) => {
+    const group = plan.id.startsWith("push") ? "push" : plan.id.startsWith("pull") ? "pull" : "legs";
+    plan.exercises.forEach((exercise) => add(exercise, group));
+  });
+  Object.values(appState.store.records || {}).forEach((record) => {
+    (record.extraExercises || []).forEach((exercise) => add(exercise, "other"));
+  });
+  return [...catalog.values()];
+}
+
+function latestExerciseHistory(exerciseId) {
+  const record = Object.values(appState.store.records || {})
+    .filter((entry) => {
+      const item = entry.exercises?.[exerciseId];
+      return item?.recordedAt || item?.sets?.some((set) => set.done || set.weight || set.reps);
+    })
+    .sort((a, b) => b.date.localeCompare(a.date))[0];
+  if (!record) return null;
+  const item = record.exercises[exerciseId];
+  const setWeight = item.sets?.find((set) => set.weight)?.weight || "";
+  const setReps = item.sets?.map((set) => set.reps).filter(Boolean) || [];
+  return {
+    date: record.date,
+    quickWeight: item.quickWeight || setWeight,
+    quickReps: item.quickReps || (setReps.length > 1 ? setReps.join("/") : setReps[0] || ""),
+  };
+}
+
+function renderWeights() {
+  const filters = [
+    ["all", "全部"],
+    ["push", "推"],
+    ["pull", "拉"],
+    ["legs", "腿"],
+  ];
+  elements.weightFilters.innerHTML = filters
+    .map(
+      ([value, label]) => `
+        <button class="${appState.weightFilter === value ? "active" : ""}" type="button" data-action="weight-filter" data-filter="${value}">${label}</button>
+      `,
+    )
+    .join("");
+
+  const exercises = exerciseCatalog().filter(
+    (exercise) => appState.weightFilter === "all" || exercise.group === appState.weightFilter,
+  );
+  elements.weightsStatus.textContent = `${exercises.length}个动作 · 自动保存`;
+  elements.weightsList.innerHTML = exercises
+    .map((exercise) => {
+      const defaults = exerciseDefault(exercise.id);
+      const latest = latestExerciseHistory(exercise.id);
+      const unit = exerciseWeightUnit(exercise);
+      const step = unit === "kg" ? 2.5 : 5;
+      const latestText = latest
+        ? `${latest.quickWeight ? `${latest.quickWeight}${unit}` : "未记重量"}${latest.quickReps ? ` · ${latest.quickReps}次` : ""}`
+        : "还没有完成记录";
+      return `
+        <article class="weight-card">
+          <header>
+            <div><strong>${escapeHtml(exercise.name)}</strong><small>上次 ${latest ? escapeHtml(formatShortDate(parseDateKey(latest.date))) : "暂无"} · ${escapeHtml(latestText)}</small></div>
+            <span class="unit-badge">${unit}</span>
+          </header>
+          <div class="weight-editor">
+            <label>
+              <span>常用重量</span>
+              <div class="compact-stepper">
+                <button type="button" data-action="adjust-default" data-exercise="${exercise.id}" data-field="quickWeight" data-delta="-${step}">−</button>
+                <input inputmode="decimal" data-action="default-value" data-exercise="${exercise.id}" data-field="quickWeight" value="${escapeHtml(defaults.quickWeight || "")}" placeholder="0" aria-label="${escapeHtml(exercise.name)}常用重量" />
+                <button type="button" data-action="adjust-default" data-exercise="${exercise.id}" data-field="quickWeight" data-delta="${step}">＋</button>
+              </div>
+            </label>
+            <label>
+              <span>常用次数</span>
+              <div class="compact-stepper reps">
+                <button type="button" data-action="adjust-default" data-exercise="${exercise.id}" data-field="quickReps" data-delta="-1">−</button>
+                <input inputmode="decimal" data-action="default-value" data-exercise="${exercise.id}" data-field="quickReps" value="${escapeHtml(defaults.quickReps || "")}" placeholder="0" aria-label="${escapeHtml(exercise.name)}常用次数" />
+                <button type="button" data-action="adjust-default" data-exercise="${exercise.id}" data-field="quickReps" data-delta="1">＋</button>
+              </div>
+            </label>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
 }
 
 function updateNav() {
@@ -619,8 +1027,11 @@ function openRecordSheet(exerciseId) {
 
   const record = ensureRecord(dateKey(appState.selectedDate), plan);
   const item = record.exercises[exerciseId];
+  const values = displayedValues(exerciseId, item);
   const [metricA, metricB] = metricLabels(exercise);
   const supportsStepper = ["strength", "core", "technique"].includes(exercise.type);
+  const weightStep = exercise.type === "strength" ? (exerciseWeightUnit(exercise) === "kg" ? 2.5 : 5) : 1;
+  const displayItem = { ...item, ...values };
 
   elements.recordSheetContent.innerHTML = `
     <header class="sheet-header">
@@ -631,24 +1042,8 @@ function openRecordSheet(exerciseId) {
       <button class="sheet-close" type="button" data-action="close-record" aria-label="关闭">×</button>
     </header>
     <div class="record-fields">
-      ${renderRecordField(exercise, item, "quickWeight", metricA, supportsStepper ? 2.5 : 0)}
-      ${renderRecordField(exercise, item, "quickReps", metricB, supportsStepper ? 1 : 0)}
-    </div>
-    <div class="feel-section">
-      <span>训练感受</span>
-      <div class="feel-row">
-        ${FEEL_OPTIONS.map(
-          (feel) => `
-            <button
-              class="feel-button${item.feel === feel ? " active" : ""}"
-              type="button"
-              data-action="set-feel"
-              data-exercise="${exercise.id}"
-              data-feel="${feel}"
-            >${feel}</button>
-          `,
-        ).join("")}
-      </div>
+      ${renderRecordField(exercise, displayItem, "quickWeight", metricA, supportsStepper ? weightStep : 0)}
+      ${renderRecordField(exercise, displayItem, "quickReps", metricB, supportsStepper ? 1 : 0)}
     </div>
     <label class="note-field">
       <span>补充备注</span>
@@ -656,7 +1051,7 @@ function openRecordSheet(exerciseId) {
         rows="3"
         data-action="exercise-note"
         data-exercise="${exercise.id}"
-        placeholder="器械档位、发力感或不舒服的位置"
+        placeholder="器械档位、动作调整或跳过原因"
       >${escapeHtml(item.note || "")}</textarea>
     </label>
     <button class="sheet-done" type="button" data-action="close-record">完成</button>
@@ -727,12 +1122,113 @@ function closeRecordSheet() {
   setTimeout(() => {
     elements.recordSheet.hidden = true;
     elements.recordSheet.dataset.exercise = "";
+    elements.recordSheet.dataset.mode = "";
   }, 180);
   render();
 }
 
+function openAddExerciseSheet(initialType = "strength") {
+  appState.extraType = initialType === "cardio" ? "cardio" : "strength";
+  appState.extraWeightUnit = "lb";
+  elements.recordSheetContent.innerHTML = `
+    <header class="sheet-header">
+      <div>
+        <p>当天实际训练</p>
+        <h2 id="recordSheetTitle">添加临时项目</h2>
+      </div>
+      <button class="sheet-close" type="button" data-action="close-record" aria-label="关闭">×</button>
+    </header>
+    <form class="extra-form" id="extraExerciseForm">
+      <div class="extra-type-row" aria-label="项目类型">
+        <button class="${appState.extraType === "strength" ? "active" : ""}" type="button" data-action="select-extra-type" data-extra-type="strength">力量动作</button>
+        <button class="${appState.extraType === "cardio" ? "active" : ""}" type="button" data-action="select-extra-type" data-extra-type="cardio">有氧 / 游泳</button>
+      </div>
+      <label class="extra-name-field"><span>名称</span><input name="name" autocomplete="off" placeholder="例如：器械夹胸" /></label>
+      <div class="extra-form-grid">
+        <label><span>组数</span><input name="sets" inputmode="numeric" value="${appState.extraType === "cardio" ? "1" : "3"}" /></label>
+        <label><span>目标</span><input name="target" autocomplete="off" value="${appState.extraType === "cardio" ? "20分钟" : "8-12次"}" /></label>
+      </div>
+      <div class="extra-unit-row" ${appState.extraType === "cardio" ? "hidden" : ""}>
+        <span>重量单位</span>
+        <div>
+          <button class="active" type="button" data-action="select-extra-unit" data-unit="lb">磅</button>
+          <button type="button" data-action="select-extra-unit" data-unit="kg">kg</button>
+        </div>
+      </div>
+      <label class="extra-name-field"><span>备注（可选）</span><input name="note" autocomplete="off" placeholder="器械、动作重点或临时安排" /></label>
+      <button class="sheet-done" type="button" data-action="add-extra">添加到今天</button>
+    </form>
+  `;
+  elements.recordSheet.dataset.mode = "add-extra";
+  elements.recordSheet.hidden = false;
+  document.body.classList.add("sheet-open");
+  requestAnimationFrame(() => {
+    elements.recordSheet.classList.add("show");
+    elements.recordSheet.querySelector('input[name="name"]')?.focus({ preventScroll: true });
+  });
+}
+
+function addExtraExercise() {
+  const form = document.querySelector("#extraExerciseForm");
+  if (!form) return;
+  const name = form.elements.name.value.trim();
+  if (!name) {
+    showToast("先写项目名称");
+    form.elements.name.focus();
+    return;
+  }
+
+  const key = dateKey(appState.selectedDate);
+  const basePlan = selectedPlan();
+  const record = ensureRecord(key, basePlan);
+  const exercise = {
+    id: `extra-${Date.now()}`,
+    name,
+    sets: Math.max(1, Math.min(12, Number.parseInt(form.elements.sets.value, 10) || 1)),
+    target: form.elements.target.value.trim() || (appState.extraType === "cardio" ? "20分钟" : "8-12次"),
+    note: form.elements.note.value.trim() || "当天临时添加，可按实际情况完成。",
+    type: appState.extraType,
+    weightUnit: appState.extraType === "strength" ? appState.extraWeightUnit : undefined,
+    extra: true,
+  };
+  record.extraExercises.push(exercise);
+  touchRecord(record);
+  ensureRecord(key, planForDate(appState.selectedDate));
+  appState.focusedExerciseId = exercise.type === "strength" ? exercise.id : appState.focusedExerciseId;
+  closeRecordSheet();
+  showToast(`${name}已加到今天`, () => removeExtraExercise(exercise.id, false));
+}
+
+function removeExtraExercise(exerciseId, allowUndo = true) {
+  const key = dateKey(appState.selectedDate);
+  const record = ensureRecord(key);
+  const index = record.extraExercises.findIndex((exercise) => exercise.id === exerciseId);
+  if (index < 0) return;
+  const exercise = record.extraExercises[index];
+  const savedItem = record.exercises[exerciseId];
+  record.extraExercises.splice(index, 1);
+  delete record.exercises[exerciseId];
+  if (appState.focusedExerciseId === exerciseId) appState.focusedExerciseId = "";
+  touchRecord(record);
+  render();
+  if (allowUndo) {
+    showToast(`${exercise.name}已删除`, () => {
+      const undoRecord = ensureRecord(key);
+      undoRecord.extraExercises.splice(index, 0, exercise);
+      undoRecord.exercises[exerciseId] = savedItem;
+      touchRecord(undoRecord);
+      render();
+    });
+  }
+}
+
 function findPlanExercise(exerciseId) {
-  return TRAINING_PLAN.flatMap((day) => day.exercises).find((exercise) => exercise.id === exerciseId);
+  const allPlans = [
+    ...TRAINING_CYCLE,
+    WEEKEND_PLANS.saturday,
+    WEEKEND_PLANS.sunday,
+  ].filter(Boolean);
+  return allPlans.flatMap((day) => day.exercises).find((exercise) => exercise.id === exerciseId);
 }
 
 function guideCredit(source) {
@@ -812,6 +1308,46 @@ function renderGuideList(items, ordered = false) {
   return `<${tag}>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</${tag}>`;
 }
 
+function renderCoachFocus(coach) {
+  if (!coach) return "";
+  return `
+    <section class="coach-focus">
+      <div class="coach-focus-meta">
+        <span>视频重点</span>
+        <small>${escapeHtml(coach.time)}</small>
+      </div>
+      <strong>${escapeHtml(coach.focus)}</strong>
+    </section>
+  `;
+}
+
+function renderCoachDetails(coach) {
+  if (!coach) return "";
+  return `
+    <section class="guide-section coach-details">
+      <header>
+        <div>
+          <span>跟着视频做</span>
+          <h3>${escapeHtml(coach.session)}</h3>
+        </div>
+        <small>${escapeHtml(coach.time)}</small>
+      </header>
+      <div class="coach-point-list">
+        ${coach.points
+          .map(
+            (point) => `
+              <article class="coach-point">
+                <span>${escapeHtml(point.label)}</span>
+                <p>${escapeHtml(point.text)}</p>
+              </article>
+            `,
+          )
+          .join("")}
+      </div>
+    </section>
+  `;
+}
+
 function renderGuideSheet() {
   const exercise = findPlanExercise(appState.guideExerciseId);
   const guide = EXERCISE_GUIDES[appState.guideExerciseId];
@@ -845,12 +1381,16 @@ function renderGuideSheet() {
       >训练肌群</button>
     </div>
 
+    ${renderCoachFocus(guide.coach)}
+
     <div class="guide-visual">${renderGuideVisual(exercise, guide)}</div>
 
     <div class="muscle-chips" aria-label="参与肌群">
       ${guide.primary.map((name) => `<span class="primary">${escapeHtml(name)}</span>`).join("")}
       ${guide.secondary.map((name) => `<span>${escapeHtml(name)}</span>`).join("")}
     </div>
+
+    ${renderCoachDetails(guide.coach)}
 
     <section class="guide-section steps">
       <h3>怎么做</h3>
@@ -916,6 +1456,7 @@ function closeGuideSheet() {
 }
 
 function recordTrainingTiming(record, progressBefore, progressAfter) {
+  if (record.session) return;
   const now = new Date().toISOString();
   if (progressBefore.complete === 0 && progressAfter.complete > 0 && !record.startedAt) {
     record.startedAt = now;
@@ -931,7 +1472,13 @@ function nextIncompleteExercise(plan, record, currentId) {
   const currentIndex = plan.exercises.findIndex((exercise) => exercise.id === currentId);
   return plan.exercises
     .slice(currentIndex + 1)
-    .find((exercise) => !getExerciseProgress(exercise, record).isComplete);
+    .find(
+      (exercise) =>
+        !exercise.optional &&
+        !isConditioningExercise(exercise) &&
+        !record.exercises[exercise.id]?.skipped &&
+        !getExerciseProgress(exercise, record).isComplete,
+    );
 }
 
 function scrollToExercise(exerciseId) {
@@ -970,7 +1517,10 @@ function toggleSet(exerciseId, setIndex) {
 
   const exerciseProgress = getExerciseProgress(exercise, record);
   let toastMessage = set.done ? `第${setIndex + 1}组已完成` : `第${setIndex + 1}组已取消`;
-  if (exerciseProgress.isComplete) {
+  if (exercise.optional) {
+    if (!isConditioningExercise(exercise)) appState.focusedExerciseId = exercise.id;
+    toastMessage = set.done ? `${exercise.name}已记录` : `${exercise.name}已取消`;
+  } else if (exerciseProgress.isComplete) {
     const next = nextIncompleteExercise(plan, record, exerciseId);
     appState.focusedExerciseId = next?.id || "";
     toastMessage = next ? `${exercise.name}完成，下一项已准备好` : "今天全部完成";
@@ -1000,6 +1550,34 @@ function toggleSet(exerciseId, setIndex) {
   }
 }
 
+function toggleSkipExercise(exerciseId) {
+  const key = dateKey(appState.selectedDate);
+  const plan = selectedPlan();
+  const record = ensureRecord(key, plan);
+  const item = record.exercises[exerciseId];
+  const exercise = plan.exercises.find((entry) => entry.id === exerciseId);
+  if (!item || !exercise) return;
+  const before = { skipped: Boolean(item.skipped), skipReason: item.skipReason || "" };
+  item.skipped = !item.skipped;
+  item.skipReason = item.skipped ? item.note?.trim() || "临时调整" : "";
+  if (item.skipped) {
+    const next = nextIncompleteExercise(plan, record, exerciseId);
+    appState.focusedExerciseId = next?.id || exerciseId;
+  } else {
+    appState.focusedExerciseId = exerciseId;
+  }
+  touchRecord(record);
+  render();
+  showToast(item.skipped ? `${exercise.name}本次已跳过` : `${exercise.name}已恢复`, () => {
+    const undoRecord = ensureRecord(key, plan);
+    undoRecord.exercises[exerciseId].skipped = before.skipped;
+    undoRecord.exercises[exerciseId].skipReason = before.skipReason;
+    appState.focusedExerciseId = exerciseId;
+    touchRecord(undoRecord);
+    render();
+  });
+}
+
 function gentleVibration(pattern) {
   if ("vibrate" in navigator) navigator.vibrate(pattern);
 }
@@ -1009,6 +1587,8 @@ function timerDuration(exercise) {
 }
 
 function startRestTimer(exercise) {
+  clearTimeout(appState.timerAutoClose);
+  appState.timerAutoClose = null;
   const duration = timerDuration(exercise);
   appState.timer = {
     exerciseName: exercise.name,
@@ -1043,6 +1623,8 @@ function tickTimer() {
     appState.timer.endAt = 0;
     gentleVibration([20, 60, 20]);
     showToast("休息结束，可以开始下一组");
+    clearTimeout(appState.timerAutoClose);
+    appState.timerAutoClose = setTimeout(() => closeTimer(), 15000);
   }
   saveTimer();
   renderTimer();
@@ -1067,9 +1649,10 @@ function formatTimer(seconds) {
 
 function renderTimer() {
   const timer = appState.timer;
-  elements.restTimer.hidden = !timer;
-  document.body.classList.toggle("timer-visible", Boolean(timer));
-  if (!timer) return;
+  const visible = Boolean(timer) && appState.activeView === "today" && dateKey(appState.selectedDate) === dateKey(new Date());
+  elements.restTimer.hidden = !visible;
+  document.body.classList.toggle("timer-visible", visible);
+  if (!visible) return;
 
   const remaining = currentTimerRemaining();
   const progress = timer.duration ? Math.max(0, Math.min(1, remaining / timer.duration)) : 0;
@@ -1101,6 +1684,8 @@ function adjustTimer(seconds) {
 
 function toggleTimer() {
   if (!appState.timer) return;
+  clearTimeout(appState.timerAutoClose);
+  appState.timerAutoClose = null;
   if (appState.timer.finished) {
     appState.timer.remaining = appState.timer.duration;
     appState.timer.endAt = Date.now() + appState.timer.duration * 1000;
@@ -1119,6 +1704,8 @@ function toggleTimer() {
 }
 
 function closeTimer() {
+  clearTimeout(appState.timerAutoClose);
+  appState.timerAutoClose = null;
   appState.timer = null;
   saveTimer();
   stopTimerTicker();
@@ -1141,7 +1728,7 @@ function showToast(message, undoAction = null) {
   appState.toastTimer = setTimeout(() => {
     elements.toast.classList.remove("show");
     appState.undoAction = null;
-  }, undoAction ? 4200 : 1800);
+  }, undoAction ? 7000 : 1800);
 }
 
 function selectDate(key) {
@@ -1196,6 +1783,50 @@ document.addEventListener("click", (event) => {
     return;
   }
 
+  if (action === "open-add-exercise") {
+    openAddExerciseSheet(button.dataset.extraType);
+    return;
+  }
+
+  if (action === "select-extra-type") {
+    appState.extraType = button.dataset.extraType;
+    document.querySelectorAll("[data-action='select-extra-type']").forEach((item) => {
+      item.classList.toggle("active", item === button);
+    });
+    const form = document.querySelector("#extraExerciseForm");
+    const isCardio = appState.extraType === "cardio";
+    if (form) {
+      form.querySelector(".extra-unit-row").hidden = isCardio;
+      if (isCardio && form.elements.sets.value === "3") form.elements.sets.value = "1";
+      if (isCardio && form.elements.target.value === "8-12次") form.elements.target.value = "20分钟";
+      if (!isCardio && form.elements.target.value === "20分钟") form.elements.target.value = "8-12次";
+    }
+    return;
+  }
+
+  if (action === "select-extra-unit") {
+    appState.extraWeightUnit = button.dataset.unit;
+    document.querySelectorAll("[data-action='select-extra-unit']").forEach((item) => {
+      item.classList.toggle("active", item === button);
+    });
+    return;
+  }
+
+  if (action === "add-extra") {
+    addExtraExercise();
+    return;
+  }
+
+  if (action === "remove-extra") {
+    removeExtraExercise(button.dataset.exercise);
+    return;
+  }
+
+  if (action === "toggle-skip") {
+    toggleSkipExercise(button.dataset.exercise);
+    return;
+  }
+
   if (action === "open-guide") {
     openGuideSheet(button.dataset.exercise);
     return;
@@ -1220,20 +1851,51 @@ document.addEventListener("click", (event) => {
   if (action === "adjust-value") {
     const record = ensureRecord(dateKey(appState.selectedDate));
     const item = record.exercises[button.dataset.exercise];
-    const current = Number.parseFloat(item[button.dataset.field]) || 0;
+    const currentValues = displayedValues(button.dataset.exercise, item);
+    const current = Number.parseFloat(currentValues[button.dataset.field]) || 0;
     const next = Math.max(0, current + Number(button.dataset.delta));
     item[button.dataset.field] = Number.isInteger(next) ? String(next) : next.toFixed(1);
+    item.recordedAt = new Date().toISOString();
+    saveExerciseDefault(button.dataset.exercise, button.dataset.field, item[button.dataset.field]);
     touchRecord(record);
     openRecordSheet(button.dataset.exercise);
     return;
   }
 
-  if (action === "set-feel") {
-    const record = ensureRecord(dateKey(appState.selectedDate));
-    const item = record.exercises[button.dataset.exercise];
-    item.feel = item.feel === button.dataset.feel ? "" : button.dataset.feel;
-    touchRecord(record);
-    openRecordSheet(button.dataset.exercise);
+  if (action === "adjust-default") {
+    const defaults = exerciseDefault(button.dataset.exercise);
+    const current = Number.parseFloat(defaults[button.dataset.field]) || 0;
+    const next = Math.max(0, current + Number(button.dataset.delta));
+    const value = Number.isInteger(next) ? String(next) : next.toFixed(1);
+    updateExerciseValue(button.dataset.exercise, button.dataset.field, value);
+    renderWeights();
+    elements.weightsStatus.textContent = "已保存";
+    return;
+  }
+
+  if (action === "weight-filter") {
+    appState.weightFilter = button.dataset.filter;
+    renderWeights();
+    return;
+  }
+
+  if (action === "session-start") {
+    startSessionTimer();
+    return;
+  }
+
+  if (action === "session-pause") {
+    pauseSessionTimer();
+    return;
+  }
+
+  if (action === "session-finish") {
+    finishSessionTimer();
+    return;
+  }
+
+  if (action === "session-reset") {
+    resetSessionTimer();
     return;
   }
 
@@ -1274,11 +1936,21 @@ document.addEventListener("input", (event) => {
 
   if (action === "quick-value") {
     record.exercises[target.dataset.exercise][target.dataset.field] = target.value;
+    record.exercises[target.dataset.exercise].recordedAt = new Date().toISOString();
+    saveExerciseDefault(target.dataset.exercise, target.dataset.field, target.value);
     touchRecord(record);
+  }
+
+  if (action === "default-value") {
+    updateExerciseValue(target.dataset.exercise, target.dataset.field, target.value);
+    elements.weightsStatus.textContent = "已保存";
   }
 
   if (action === "exercise-note") {
     record.exercises[target.dataset.exercise].note = target.value;
+    if (record.exercises[target.dataset.exercise].skipped) {
+      record.exercises[target.dataset.exercise].skipReason = target.value.trim() || "临时调整";
+    }
     touchRecord(record);
   }
 
@@ -1315,14 +1987,130 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && appState.timer) tickTimer();
 });
 
+function migrateLegacyRecords() {
+  const oldTitles = {
+    0: "休息",
+    1: "全身A + 20分钟有氧",
+    2: "肩手臂核心 + 30分钟有氧",
+    3: "全身B + 20分钟有氧",
+    4: "动作练习 + 小肌群 + 30分钟有氧",
+    5: "全身A + 20分钟有氧",
+    6: "可选轻松游泳",
+  };
+  const oldNames = {
+    "leg-press": "坐姿腿举",
+    "chest-press": "坐姿推胸器",
+    "lat-pulldown": "高位下拉",
+    "leg-curl": "坐姿腿弯举",
+    "seated-row": "坐姿划船",
+    "lateral-raise": "侧平举",
+    crunch: "卷腹",
+    "cardio-20": "爬坡或单车",
+    "machine-lateral-raise": "器械侧平举",
+    "reverse-fly": "反向飞鸟",
+    "triceps-pushdown": "绳索下压",
+    "biceps-curl": "二头弯举",
+    "crunch-plus": "卷腹",
+    plank: "平板支撑",
+    "cardio-30-a": "爬坡或单车",
+    "hack-squat": "哈克深蹲或腿举",
+    "incline-press": "上斜推胸器",
+    "chest-supported-row": "胸托划船器",
+    "hip-thrust": "臀推器械",
+    "neutral-pulldown": "中立握高位下拉",
+    "reverse-fly-b": "反向飞鸟",
+    "crunch-b": "卷腹",
+    "cardio-short-b": "轻中等强度有氧",
+    "light-pulldown": "轻重量高位下拉",
+    "light-row": "轻重量坐姿划船",
+    "light-chest-press": "轻重量推胸器",
+    "hip-abduction": "髋外展器",
+    "calf-raise": "小腿提踵",
+    "core-choice": "核心训练",
+    "cardio-30-b": "爬坡或单车",
+    "easy-swim": "轻松蛙泳",
+    mobility: "拉伸放松",
+    "rest-day": "休息完成",
+  };
+
+  let changed = false;
+  Object.values(appState.store.records || {}).forEach((record) => {
+    if (record.planId || record.planSnapshot || !hasRecordContent(record)) return;
+    const date = parseDateKey(record.date);
+    const exercises = Object.entries(record.exercises || {}).map(([id, item]) => {
+      const isCardio = id.includes("cardio") || id.includes("swim");
+      const isRecovery = id === "mobility" || id === "rest-day";
+      return {
+        id,
+        name: oldNames[id] || id,
+        sets: Math.max(1, item.sets?.length || 1),
+        target: "旧版记录",
+        note: "这是切换三分化前保存的训练内容。",
+        type: isRecovery ? "recovery" : isCardio ? "cardio" : "strength",
+      };
+    });
+
+    record.planSnapshot = {
+      id: `legacy-${record.date}`,
+      day: WEEKDAY_NAMES[date.getDay()],
+      shortTitle: "旧计划",
+      title: oldTitles[date.getDay()] || "旧版训练记录",
+      focus: "切换三分化前的历史记录，原始打卡数据已保留。",
+      tags: ["旧版记录"],
+      exercises,
+    };
+    changed = true;
+  });
+
+  if (changed) saveStore();
+}
+
+function migrateExerciseDefaults() {
+  ensureStoreShape();
+  const records = Object.values(appState.store.records)
+    .filter(hasRecordContent)
+    .sort((a, b) => b.date.localeCompare(a.date));
+  let changed = false;
+
+  exerciseCatalog().forEach((exercise) => {
+    const defaults = exerciseDefault(exercise.id);
+    if (defaults.quickWeight && defaults.quickReps) return;
+    const previous = records
+      .map((record) => record.exercises?.[exercise.id])
+      .find((item) => item?.quickWeight || item?.quickReps || item?.sets?.some((set) => set.weight || set.reps));
+    if (!previous) return;
+    const setWeight = previous.sets?.find((set) => set.weight)?.weight || "";
+    const setReps = previous.sets?.map((set) => set.reps).filter(Boolean) || [];
+    if (!defaults.quickWeight && (previous.quickWeight || setWeight)) {
+      defaults.quickWeight = previous.quickWeight || setWeight;
+      changed = true;
+    }
+    if (!defaults.quickReps && (previous.quickReps || setReps.length)) {
+      defaults.quickReps = previous.quickReps || (setReps.length > 1 ? setReps.join("/") : setReps[0] || "");
+      changed = true;
+    }
+    appState.store.exerciseDefaults[exercise.id] = defaults;
+  });
+
+  if (changed) saveStore();
+}
+
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
   });
 }
 
+ensureStoreShape();
+migrateLegacyRecords();
+migrateExerciseDefaults();
 if (appState.timer) {
-  tickTimer();
-  ensureTimerTicker();
+  if (appState.timer.finished || (appState.timer.running && appState.timer.endAt < Date.now())) {
+    appState.timer = null;
+    saveTimer();
+  } else {
+    tickTimer();
+    ensureTimerTicker();
+  }
 }
 render();
