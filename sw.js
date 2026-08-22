@@ -1,4 +1,4 @@
-const CACHE_NAME = "training-checkin-v4";
+const CACHE_NAME = "training-checkin-v10";
 const EXERCISE_PAIRS = [
   "bicep-curl",
   "chest-press-machine",
@@ -30,6 +30,22 @@ const EXERCISE_SINGLES = [
   "./assets/exercises/walking-treadmill-start.jpg",
   "./assets/exercises/walking-treadmill-peak.jpg",
 ];
+const FREE_DB_PAIRS = [
+  "assisted-dip",
+  "hammer-curl",
+  "leg-extension",
+  "low-cable-fly",
+  "narrow-neutral-row",
+  "overhead-triceps",
+  "rear-delt-extension",
+  "reverse-grip-pulldown",
+  "shoulder-press",
+  "straight-arm-pulldown",
+  "upper-back-row",
+].flatMap((slug) => [
+  `./assets/exercises/${slug}-start.jpg`,
+  `./assets/exercises/${slug}-peak.jpg`,
+]);
 const MUSCLE_MAPS = [
   "back-pull",
   "biceps",
@@ -51,14 +67,15 @@ const MUSCLE_MAPS = [
 const ASSETS = [
   "./",
   "./index.html",
-  "./styles.css?v=4",
-  "./app.js?v=4",
-  "./guides.js?v=4",
-  "./experience.js?v=4",
+  "./styles.css?v=10",
+  "./app.js?v=10",
+  "./guides.js?v=10",
+  "./experience.js?v=10",
   "./manifest.webmanifest",
   "./icons/icon.svg",
   ...EXERCISE_PAIRS,
   ...EXERCISE_SINGLES,
+  ...FREE_DB_PAIRS,
   ...MUSCLE_MAPS,
 ];
 
@@ -78,6 +95,18 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("fetch", (event) => {
   if (event.request.method !== "GET") return;
+  if (event.request.mode === "navigate") {
+    event.respondWith(
+      fetch(event.request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put("./index.html", copy));
+          return response;
+        })
+        .catch(() => caches.match("./index.html")),
+    );
+    return;
+  }
   event.respondWith(
     caches.match(event.request).then((cached) => {
       if (cached) return cached;

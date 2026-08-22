@@ -1,0 +1,6 @@
+research/
+*.mp4
+*.wav
+*.jsonl
+Thumbs.db
+.DS_Store
